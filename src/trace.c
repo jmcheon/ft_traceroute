@@ -151,48 +151,6 @@ static int	match_icmp(t_trace *p, unsigned char *buf, ssize_t n, int seq,
 	return (ntohs(oic->icmp_id) == p->id && ntohs(oic->icmp_seq) == seq);
 }
 
-// wait up to PROBE_TIMEOUT for the reply to probe `seq`; fill hop/rtt/done
-static int	wait_reply(t_trace *p, int seq, struct timeval *sent, t_reply *r)
-{
-	unsigned char		buf[512];
-	struct sockaddr_in	from;
-	socklen_t			flen;
-	struct timeval		tv;
-	struct timeval		now;
-	fd_set				rset;
-	ssize_t				n;
-	int					matched;
-	int					done;
-
-	tv.tv_sec = PROBE_TIMEOUT;
-	tv.tv_usec = 0;
-	while (1)
-	{
-		FD_ZERO(&rset);
-		FD_SET(p->recv_sock, &rset);
-		if (select(p->recv_sock + 1, &rset, NULL, NULL, &tv) <= 0)
-			return (0);
-		flen = sizeof(from);
-		n = recvfrom(p->recv_sock, buf, sizeof(buf), 0,
-				(struct sockaddr *)&from, &flen);
-		if (n < 0)
-			continue;
-		done = 0;
-		if (p->mode == MODE_ICMP)
-			matched = match_icmp(p, buf, n, seq, &done);
-		else
-			matched = match_udp(p, buf, n, seq, &done);
-		if (!matched)
-			continue;
-		gettimeofday(&now, NULL);
-		r->rtt = (now.tv_sec - sent->tv_sec) * 1000.0
-			+ (now.tv_usec - sent->tv_usec) / 1000.0;
-		r->from = from.sin_addr;
-		r->done = done;
-		return (1);
-	}
-}
-
 // print one probe result on the current hop line, tracking IP changes
 static void	print_probe(t_reply *r, int got, struct in_addr *last)
 {
@@ -216,7 +174,7 @@ static void	print_probe(t_reply *r, int got, struct in_addr *last)
                         hostbuf, sizeof(hostbuf), NULL, 0, 0) == 0)
             printf(" %s (%s)", hostbuf, ipbuf);
 		else
-            printf(" %s", ipbuf);
+            printf(" %s (%s)", ipbuf, ipbuf);
 		*last = r->from;
 	}
 	printf("  %.3f ms", r->rtt);
@@ -224,43 +182,166 @@ static void	print_probe(t_reply *r, int got, struct in_addr *last)
 
 int	trace_loop(t_trace *p)
 {
-	struct timeval	sent;
+	t_hop			hops[MAX_HOPS_LIMIT + 1];
 	struct in_addr	last;
-	t_reply			r;
-	int				ttl;
-	int				probe;
-	int				seq;
-	int				reached;
-	int				got;
+	struct timeval	now;
+	int				send_ttl = p->first_ttl;
+	int				send_probe_idx = 0;
+	int				print_ttl = p->first_ttl;
+	int				printed_probes = 0;
+	int				header_printed = 0;
+	int				seq = 0;
+	unsigned long   active_queries = 0;
+	int				target_reached = 0;
 
 	if (trace_setup(p) != 0)
 		return (fprintf(stderr, "ft_traceroute: socket: %s\n",
 				strerror(errno)), 1);
+
 	printf("traceroute to %s (%s), %d hops max, %d byte packets\n",
 		p->host, p->ip_str, p->max_hops, 20 + 8 + PROBE_DATALEN);
-	seq = 0;
-	reached = 0;
-	ttl = p->first_ttl;
-	while (ttl <= p->max_hops && !reached)
+	fflush(stdout);
+
+	memset(hops, 0, sizeof(hops));
+
+	while (print_ttl <= p->max_hops && (!target_reached || print_ttl <= target_reached))
 	{
-		setsockopt(send_fd(p), IPPROTO_IP, IP_TTL, &ttl, sizeof(ttl));
-		printf("%2d ", ttl);
-		last.s_addr = 0;
-		probe = 0;
-		while (probe < p->nprobes)
+        // 1. Send probes in fixed limit by -N (p->nqueries)
+		while (active_queries < p->nqueries && send_ttl <= p->max_hops && !target_reached)
 		{
-			gettimeofday(&sent, NULL);
+			t_hop *h = &hops[send_ttl];
+			h->ttl = send_ttl;
+
+			setsockopt(send_fd(p), IPPROTO_IP, IP_TTL, &send_ttl, sizeof(send_ttl));
+
+			gettimeofday(&h->probes[send_probe_idx].send_time, NULL);
+			h->probes[send_probe_idx].seq = seq;
+			h->probes[send_probe_idx].sent = 1;
+
 			send_probe(p, seq);
-			got = wait_reply(p, seq, &sent, &r);
-			print_probe(&r, got, &last);
-			if (got && r.done)
-				reached = 1;
+
 			seq++;
-			probe++;
+			active_queries++;
+			send_probe_idx++;
+
+			if (send_probe_idx == p->nprobes)
+			{
+				send_probe_idx = 0;
+				send_ttl++;
+			}
 		}
-		printf("\n");
-		ttl++;
+
+        // 2. Receive the responds (select with timeout shorter than 10 ms)
+		fd_set rset;
+		FD_ZERO(&rset);
+		FD_SET(p->recv_sock, &rset);
+		struct timeval tv = { .tv_sec = 0, .tv_usec = 10000 };
+
+		if (select(p->recv_sock + 1, &rset, NULL, NULL, &tv) > 0)
+		{
+			unsigned char buf[512];
+			struct sockaddr_in from;
+			socklen_t flen = sizeof(from);
+			ssize_t n = recvfrom(p->recv_sock, buf, sizeof(buf), 0,
+					(struct sockaddr *)&from, &flen);
+
+			if (n > 0)
+			{
+				for (int t = p->first_ttl; t <= send_ttl && t <= p->max_hops; t++)
+				{
+					for (int pb = 0; pb < p->nprobes; pb++)
+					{
+						t_probe *pr = &hops[t].probes[pb];
+						if (pr->sent && pr->got == 0)
+						{
+							int done = 0;
+							int match = (p->mode == MODE_ICMP)
+								? match_icmp(p, buf, n, pr->seq, &done)
+								: match_udp(p, buf, n, pr->seq, &done);
+
+							if (match)
+							{
+								gettimeofday(&now, NULL);
+								pr->reply.rtt = (now.tv_sec - pr->send_time.tv_sec) * 1000.0
+									+ (now.tv_usec - pr->send_time.tv_usec) / 1000.0;
+								pr->reply.from = from.sin_addr;
+								pr->reply.done = done;
+								pr->got = 1;
+								active_queries--;
+
+								if (done && (!target_reached || t < target_reached))
+									target_reached = t;
+							}
+						}
+					}
+				}
+			}
+		}
+
+        // 3. timeouts management for the probes without responds
+		gettimeofday(&now, NULL);
+		for (int t = p->first_ttl; t <= send_ttl && t <= p->max_hops; t++)
+		{
+			for (int pb = 0; pb < p->nprobes; pb++)
+			{
+				t_probe *pr = &hops[t].probes[pb];
+				if (pr->sent && pr->got == 0)
+				{
+					double diff = (now.tv_sec - pr->send_time.tv_sec)
+						+ (now.tv_usec - pr->send_time.tv_usec) / 1000000.0;
+					if (diff >= PROBE_TIMEOUT)
+					{
+						pr->got = -1; // expired
+						active_queries--;
+					}
+				}
+			}
+		}
+        // 4. progressive probe by probe display for print_ttl
+		while (print_ttl <= p->max_hops)
+		{
+			t_hop *h = &hops[print_ttl];
+
+			if (h->probes[0].got == 0)
+				break ;
+
+			if (!header_printed)
+			{
+				printf("%2d ", print_ttl);
+				fflush(stdout);
+				header_printed = 1;
+				last.s_addr = 0;
+			}
+
+			while (printed_probes < p->nprobes)
+			{
+				t_probe *pr = &h->probes[printed_probes];
+				if (pr->got == 0)
+					break ; // wait for the respond or the next probe timeout
+				print_probe(&pr->reply, (pr->got == 1), &last);
+				fflush(stdout);
+				printed_probes++;
+			}
+
+			if (printed_probes == p->nprobes)
+			{
+				printf("\n");
+				fflush(stdout);
+				header_printed = 0;
+				printed_probes = 0;
+
+				if (target_reached && print_ttl == target_reached)
+				{
+					print_ttl = p->max_hops + 1;
+					break ;
+				}
+				print_ttl++;
+			}
+			else
+				break ;
+		}
 	}
+
 	close(p->send_sock);
 	close(p->recv_sock);
 	return (0);

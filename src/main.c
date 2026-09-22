@@ -29,13 +29,17 @@ static int	*opt_target(t_trace *p, const char *arg)
 static int	validate_opts(t_trace *p)
 {
 	if (p->max_hops < 1 || p->max_hops > 255)
-		return (fprintf(stderr, "ft_traceroute: max hops must be 1..255\n"), -1);
+		return (fprintf(stderr, "ft_traceroute: first hop out of range\n"), -1);
+	if (p->max_hops > 255)
+		return (fprintf(stderr, "ft_traceroute: max hops cannot be more than 255\n"), -1);
 	if (p->nprobes < 1)
 		return (fprintf(stderr, "ft_traceroute: nprobes must be >= 1\n"), -1);
 	if (p->first_ttl < 1 || p->first_ttl > p->max_hops)
 		return (fprintf(stderr, "ft_traceroute: first ttl must be 1..max\n"), -1);
 	if (p->base_port < 1 || p->base_port > 65535)
 		return (fprintf(stderr, "ft_traceroute: port must be 1..65535\n"), -1);
+	if (p->nqueries == 0)
+		p->nqueries = 1;
 	return (0);
 }
 
@@ -52,6 +56,12 @@ static int	parse_args(t_trace *p, int argc, char **argv)
 			usage(0);
 		else if (!strcmp(argv[i], "-I"))
 			p->mode = MODE_ICMP;
+        else if (!strcmp(argv[i], "-N"))
+		{
+			if (i + 1 >= argc)
+				return (fprintf(stderr, "ft_traceroute: option '-N' needs a value\n"), -1);
+			p->nqueries = strtoul(argv[++i], NULL, 10);
+		}
 		else if ((tgt = opt_target(p, argv[i])) != NULL)
 		{
 			if (int_opt(argc, argv, &i, tgt) != 0)
@@ -97,11 +107,12 @@ int	main(int argc, char **argv)
 	p.nprobes = PROBES_PER_HOP;
 	p.first_ttl = 1;
 	p.base_port = BASE_PORT;
+    p.nqueries = MAX_SIMULTANEOUS;
 	if (parse_args(&p, argc, argv) != 0)
 		return (64);
 	if (resolve(&p) != 0)
 	{
-		fprintf(stderr, "ft_traceroute: unknown host %s\n", p.host);
+		fprintf(stderr, "ft_traceroute: Name or service not known %s\n", p.host);
 		return (1);
 	}
 	p.id = getpid() & 0xffff;

@@ -19,6 +19,7 @@
 # include <arpa/inet.h>
 
 # define MAX_HOPS       30      // stop after this TTL (real traceroute default)
+# define MAX_HOPS_LIMIT 255
 # define PROBES_PER_HOP 3       // probes sent per hop -> 3 RTTs per line
 # define BASE_PORT      33434   // classic UDP traceroute base destination port
 # define PROBE_TIMEOUT  3       // seconds to wait for a reply before "*"
@@ -26,6 +27,7 @@
 
 # define MODE_UDP       0       // default: UDP probes to high ports
 # define MODE_ICMP      1       // -I bonus: ICMP ECHO probes (like ping)
+# define MAX_SIMULTANEOUS 16 // Equivalent to -N 16
 
 // one probe's reply: where it came from, round-trip time, is-it-the-destination
 typedef struct s_reply
@@ -34,6 +36,20 @@ typedef struct s_reply
 	double			rtt;	// round-trip time in ms
 	int				done;	// 1 if this reply is from the destination -> stop
 }	t_reply;
+
+typedef struct s_probe {
+	int				seq;
+	int				sent;      // 1 if sent, 0 otherwise 
+	int				got;       // 1 if reponse received, -1 if timeout, 0 in progress 
+	struct timeval	send_time;
+	t_reply			reply;
+} t_probe;
+
+typedef struct s_hop {
+	int		ttl;
+	t_probe	probes[3];
+	int		done;          // 1 si la destination finale a répondu sur ce saut
+} t_hop;
 
 typedef struct s_trace
 {
@@ -47,6 +63,7 @@ typedef struct s_trace
 	int					first_ttl;	// -f bonus, default 1
 	int					base_port;	// -p bonus, default BASE_PORT
 	int					mode;		// -I bonus: MODE_UDP or MODE_ICMP
+    unsigned long       nqueries;   // -N bonus, default MAX_SIMULTANEOUS
 	unsigned short		id;			// our pid, marks our probes among the noise
 }	t_trace;
 
