@@ -196,17 +196,27 @@ static int	wait_reply(t_trace *p, int seq, struct timeval *sent, t_reply *r)
 // print one probe result on the current hop line, tracking IP changes
 static void	print_probe(t_reply *r, int got, struct in_addr *last)
 {
-	char	ipbuf[INET_ADDRSTRLEN];
+	char	            ipbuf[INET_ADDRSTRLEN];
+    char                hostbuf[NI_MAXHOST];
+    struct sockaddr_in  sa;
 
 	if (!got)
 	{
-		printf("  *");
+		printf(" *");
 		return ;
 	}
 	if (last->s_addr != r->from.s_addr)
 	{
 		inet_ntop(AF_INET, &r->from, ipbuf, sizeof(ipbuf));
-		printf(" %s", ipbuf);
+        // Reserve DNS lookup
+        memset(&sa, 0, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_addr = r->from;
+        if (getnameinfo((struct sockaddr *)&sa, sizeof(sa), 
+                        hostbuf, sizeof(hostbuf), NULL, 0, 0) == 0)
+            printf(" %s (%s)", hostbuf, ipbuf);
+		else
+            printf(" %s", ipbuf);
 		*last = r->from;
 	}
 	printf("  %.3f ms", r->rtt);
