@@ -48,7 +48,7 @@ typedef struct s_probe {
 typedef struct s_hop {
 	int		ttl;
 	t_probe	probes[3];
-	int		done;          // 1 si la destination finale a répondu sur ce saut
+	int		done;          // 1 if the final destination reponded to this hop 
 } t_hop;
 
 typedef struct s_trace
