@@ -1,0 +1,21 @@
+# Evaluation VM for ft_traceroute — Debian x86-64, same provisioning as dev VM.
+# Run from this directory:
+#   vagrant up && vagrant ssh
+# The repo root is shared into the VM at /home/vagrant/ft_traceroute.
+Vagrant.configure("2") do |config|
+  config.vm.box = "debian/bookworm64"
+  config.vm.hostname = "ft-traceroute"
+
+  config.vm.synced_folder "..", "/home/vagrant/ft_traceroute"
+
+  config.vm.provision "shell", path: "provision.sh"
+
+  config.vm.provider "virtualbox" do |vb|
+    vb.memory = 2048
+    vb.cpus = 2
+  end
+  config.vm.provider "libvirt" do |lv|
+    lv.memory = 2048
+    lv.cpus = 2
+  end
+end
