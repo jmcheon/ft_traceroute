@@ -27,7 +27,6 @@
 
 # define MODE_UDP       0       // default: UDP probes to high ports
 # define MODE_ICMP      1       // -I bonus: ICMP ECHO probes (like ping)
-# define MAX_SIMULTANEOUS 16 // Equivalent to -N 16
 
 // one probe's reply: where it came from, round-trip time, is-it-the-destination
 typedef struct s_reply
@@ -63,7 +62,6 @@ typedef struct s_trace
 	int					first_ttl;	// -f bonus, default 1
 	int					base_port;	// -p bonus, default BASE_PORT
 	int					mode;		// -I bonus: MODE_UDP or MODE_ICMP
-    unsigned long       nqueries;   // -N bonus, default MAX_SIMULTANEOUS
 	unsigned short		id;			// our pid, marks our probes among the noise
 }	t_trace;
 

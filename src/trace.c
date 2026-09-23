@@ -35,7 +35,10 @@ static int	trace_setup(t_trace *p)
 		return (-1);
 	p->recv_sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
 	if (p->recv_sock < 0)
+	{
+		close(p->send_sock);
 		return (-1);
+	}
 	return (0);
 }
 
@@ -48,7 +51,7 @@ static int	send_fd(t_trace *p)
 }
 
 // UDP probe: destination port encodes the sequence (base_port + seq)
-static void	send_udp_probe(t_trace *p, int seq)
+static int	send_udp_probe(t_trace *p, int seq)
 {
 	struct sockaddr_in	dst;
 	char				payload[PROBE_DATALEN];
@@ -56,12 +59,14 @@ static void	send_udp_probe(t_trace *p, int seq)
 	memset(payload, 0, sizeof(payload));
 	dst = p->dest;
 	dst.sin_port = htons(p->base_port + seq);
-	sendto(p->send_sock, payload, sizeof(payload), 0,
-		(struct sockaddr *)&dst, sizeof(dst));
+	if (sendto(p->send_sock, payload, sizeof(payload), 0,
+			(struct sockaddr *)&dst, sizeof(dst)) < 0)
+		return (-1);
+	return (0);
 }
 
 // ICMP probe: an echo request carrying our id + seq (like ping)
-static void	send_icmp_probe(t_trace *p, int seq)
+static int	send_icmp_probe(t_trace *p, int seq)
 {
 	unsigned char	pkt[8 + PROBE_DATALEN];
 	struct icmp		*ic;
@@ -73,23 +78,24 @@ static void	send_icmp_probe(t_trace *p, int seq)
 	ic->icmp_id = htons(p->id);
 	ic->icmp_seq = htons(seq);
 	ic->icmp_cksum = icmp_checksum(pkt, sizeof(pkt));
-	sendto(p->recv_sock, pkt, sizeof(pkt), 0,
-		(struct sockaddr *)&p->dest, sizeof(p->dest));
+	if (sendto(p->recv_sock, pkt, sizeof(pkt), 0,
+			(struct sockaddr *)&p->dest, sizeof(p->dest)) < 0)
+		return (-1);
+	return (0);
 }
 
-static void	send_probe(t_trace *p, int seq)
+static int	send_probe(t_trace *p, int seq)
 {
 	if (p->mode == MODE_ICMP)
-		send_icmp_probe(p, seq);
-	else
-		send_udp_probe(p, seq);
+		return (send_icmp_probe(p, seq));
+	return (send_udp_probe(p, seq));
 }
 
 // [C] UDP mode: the reply embeds our original IP + UDP header;
 // the embedded destination port (base_port+seq) identifies our probe.
 static int	match_udp(t_trace *p, unsigned char *buf, ssize_t n, int seq, int *done)
 {
-    struct ip       *ip;
+	struct ip		*ip;
 	struct icmp		*icmp;
 	struct ip		*oip;
 	size_t			hlen;
@@ -100,36 +106,30 @@ static int	match_udp(t_trace *p, unsigned char *buf, ssize_t n, int seq, int *do
 	hlen = (size_t)ip->ip_hl << 2;
 	if (n < (ssize_t)(hlen + ICMP_MINLEN + sizeof(struct ip) + 8))
 		return (0);
-
 	icmp = (struct icmp *)(buf + hlen);
 	if (icmp->icmp_type != ICMP_TIMXCEED && icmp->icmp_type != ICMP_UNREACH)
 		return (0);
-
 	oip = (struct ip *)(buf + hlen + ICMP_MINLEN);
 	ohlen = (size_t)oip->ip_hl << 2;
-    // check protocol
-	if (oip->ip_p != IPPROTO_UDP || n < (ssize_t)(hlen + ICMP_MINLEN + ohlen + 4))
+	if (oip->ip_p != IPPROTO_UDP
+		|| n < (ssize_t)(hlen + ICMP_MINLEN + ohlen + 8))
 		return (0);
-
-    // check source ip
-    if (oip->ip_dst.s_addr != p->dest.sin_addr.s_addr)
-        return (0);
-
-    // check port number
+	if (oip->ip_dst.s_addr != p->dest.sin_addr.s_addr)
+		return (0);
 	oudp = (unsigned char *)oip + ohlen;
 	if (((oudp[2] << 8) | oudp[3]) != p->base_port + seq)
 		return (0);
-
 	if (icmp->icmp_type == ICMP_UNREACH)
 	{
-		if (icmp->icmp_code == ICMP_UNREACH_PORT && ip->ip_src.s_addr == p->dest.sin_addr.s_addr)
+		if (icmp->icmp_code == ICMP_UNREACH_PORT
+			&& ip->ip_src.s_addr == p->dest.sin_addr.s_addr)
 		{
 			*done = 1;
-			return (1); 
+			return (1);
 		}
 		return (0);
 	}
-    *done = 0;
+	*done = 0;
 	return (1);
 }
 
@@ -148,33 +148,37 @@ static int	match_icmp(t_trace *p, unsigned char *buf, ssize_t n, int seq, int *d
 	hlen = (size_t)ip->ip_hl << 2;
 	if (n < (ssize_t)(hlen + ICMP_MINLEN))
 		return (0);
-
 	icmp = (struct icmp *)(buf + hlen);
 	if (icmp->icmp_type == ICMP_ECHOREPLY)
 	{
-		*done = 1;
-		return (ntohs(icmp->icmp_id) == p->id && ntohs(icmp->icmp_seq) == seq);
+		if (ntohs(icmp->icmp_id) == p->id
+			&& ntohs(icmp->icmp_seq) == seq)
+		{
+			*done = 1;
+			return (1);
+		}
+		return (0);
 	}
 	if (icmp->icmp_type != ICMP_TIMXCEED
 		|| n < (ssize_t)(hlen + ICMP_MINLEN + sizeof(struct ip) + 8))
 		return (0);
-
 	oip = (struct ip *)(buf + hlen + ICMP_MINLEN);
 	ohlen = (size_t)oip->ip_hl << 2;
-	if (oip->ip_p != IPPROTO_ICMP || n < (ssize_t)(hlen + ICMP_MINLEN + ohlen + 8))
+	if (oip->ip_p != IPPROTO_ICMP
+		|| n < (ssize_t)(hlen + ICMP_MINLEN + ohlen + 8))
 		return (0);
-
 	oic = (struct icmp *)((unsigned char *)oip + ohlen);
 	*done = 0;
-	return (ntohs(oic->icmp_id) == p->id && ntohs(oic->icmp_seq) == seq);
+	return (ntohs(oic->icmp_id) == p->id
+		&& ntohs(oic->icmp_seq) == seq);
 }
 
 // print one probe result on the current hop line, tracking IP changes
 static void	print_probe(t_reply *r, int got, struct in_addr *last)
 {
-	char	            ipbuf[INET_ADDRSTRLEN];
-    char                hostbuf[NI_MAXHOST];
-    struct sockaddr_in  sa;
+	char			ipbuf[INET_ADDRSTRLEN];
+	char			hostbuf[NI_MAXHOST];
+	struct sockaddr_in	sa;
 
 	if (!got)
 	{
@@ -184,202 +188,161 @@ static void	print_probe(t_reply *r, int got, struct in_addr *last)
 	if (last->s_addr != r->from.s_addr)
 	{
 		inet_ntop(AF_INET, &r->from, ipbuf, sizeof(ipbuf));
-        // Reserve DNS lookup
-        memset(&sa, 0, sizeof(sa));
-        sa.sin_family = AF_INET;
-        sa.sin_addr = r->from;
-        if (getnameinfo((struct sockaddr *)&sa, sizeof(sa), 
-                        hostbuf, sizeof(hostbuf), NULL, 0, 0) == 0)
-            printf(" %s (%s)", hostbuf, ipbuf);
+		memset(&sa, 0, sizeof(sa));
+		sa.sin_family = AF_INET;
+		sa.sin_addr = r->from;
+		if (getnameinfo((struct sockaddr *)&sa, sizeof(sa),
+				hostbuf, sizeof(hostbuf), NULL, 0, 0) == 0)
+			printf(" %s (%s)", hostbuf, ipbuf);
 		else
-            printf(" %s (%s)", ipbuf, ipbuf);
+			printf(" %s (%s)", ipbuf, ipbuf);
 		*last = r->from;
 	}
 	printf("  %.3f ms", r->rtt);
 }
 
-int	trace_loop(t_trace *p)
+// Wait for exactly one reply matching the probe that was just sent.
+static int	wait_for_reply(t_trace *p, t_probe *pr)
 {
-	t_hop			hops[MAX_HOPS_LIMIT + 1];
-	struct in_addr	last;
-	struct timeval	now;
-	int				send_ttl = p->first_ttl;
-	int				send_probe_idx = 0;
-	int				print_ttl = p->first_ttl;
-	int				printed_probes = 0;
-	int				header_printed = 0;
-	unsigned long   active_queries = 0;
-	int				target_reached = 0;
+	struct timeval	start;
 
-	if (trace_setup(p) != 0)
-		return (fprintf(stderr, "ft_traceroute: socket: %s\n",
-				strerror(errno)), 1);
-
-	printf("traceroute to %s (%s), %d hops max, %d byte packets\n",
-		p->host, p->ip_str, p->max_hops, 20 + 8 + PROBE_DATALEN);
-	fflush(stdout);
-
-	memset(hops, 0, sizeof(hops));
-
-	while (print_ttl <= p->max_hops && (!target_reached || print_ttl <= target_reached))
+	gettimeofday(&start, NULL);
+	while (1)
 	{
-        // 1. Send probes in fixed limit by -N (p->nqueries)
-		while (active_queries < p->nqueries && send_ttl <= p->max_hops && 
-		        (!target_reached || send_ttl <= target_reached))
-		{
-			t_hop *h = &hops[send_ttl];
-			h->ttl = send_ttl;
+		struct timeval	now;
+		struct timeval	left;
+		long			elapsed_ms;
+		fd_set			fds;
+		int			ret;
 
-			setsockopt(send_fd(p), IPPROTO_IP, IP_TTL, &send_ttl, sizeof(send_ttl));
-
-			gettimeofday(&h->probes[send_probe_idx].send_time, NULL);
-			
-			// TTL과 프로브 인덱스를 조합하여 고유한 시퀀스 생성
-			// 예: TTL이 1이고 인덱스가 0이면 seq는 0
-			//     TTL이 5이고 인덱스가 2면 seq는 (4 * 3) + 2 = 14
-			int current_seq = ((send_ttl - 1) * p->nprobes) + send_probe_idx;
-			
-			h->probes[send_probe_idx].seq = current_seq;
-			h->probes[send_probe_idx].sent = 1;
-
-			send_probe(p, current_seq);
-
-			active_queries++;
-			send_probe_idx++;
-
-			if (send_probe_idx == p->nprobes)
-			{
-				send_probe_idx = 0;
-				send_ttl++;
-			}
-		}
-
-        // 2. Receive the responds (select with timeout shorter than 10 ms)
-		fd_set rset;
-		FD_ZERO(&rset);
-		FD_SET(p->recv_sock, &rset);
-		struct timeval tv = { .tv_sec = 0, .tv_usec = 10000 };
-
-		if (select(p->recv_sock + 1, &rset, NULL, NULL, &tv) > 0)
-		{
-			unsigned char buf[512];
-			struct sockaddr_in from;
-			socklen_t flen = sizeof(from);
-			ssize_t n = recvfrom(p->recv_sock, buf, sizeof(buf), 0,
-					(struct sockaddr *)&from, &flen);
-            //printf("n:%ld", n);
-            //printf("buf: %s", buf);
-			if (n > 0)
-			{
-				for (int t = p->first_ttl; t <= send_ttl && t <= p->max_hops; t++)
-				{
-					for (int pb = 0; pb < p->nprobes; pb++)
-					{
-						t_probe *pr = &hops[t].probes[pb];
-						if (pr->sent && pr->got == 0)
-						{
-                            //printf("seq:%d\n", pr->seq);
-							int done = 0;
-							int match = (p->mode == MODE_ICMP)
-								? match_icmp(p, buf, n, pr->seq, &done)
-								: match_udp(p, buf, n, pr->seq, &done);
-
-							if (match)
-							{
-								gettimeofday(&now, NULL);
-								pr->reply.rtt = (now.tv_sec - pr->send_time.tv_sec) * 1000.0
-									+ (now.tv_usec - pr->send_time.tv_usec) / 1000.0;
-                                
-                                struct ip *ip = (struct ip *)buf;
-								pr->reply.from = ip->ip_src;
-								pr->reply.done = done;
-								pr->got = 1;
-								active_queries--;
-
-								if (done && (!target_reached || t < target_reached))
-									target_reached = t;
-                                break;
-							}
-						}
-					}
-				}
-			}
-		}
-
-        // 3. timeouts management for the probes without responds
 		gettimeofday(&now, NULL);
-		for (int t = p->first_ttl; t <= send_ttl && t <= p->max_hops; t++)
+		elapsed_ms = (now.tv_sec - start.tv_sec) * 1000L
+			+ (now.tv_usec - start.tv_usec) / 1000L;
+		if (elapsed_ms >= PROBE_TIMEOUT * 1000L)
+			return (0);
 		{
-			for (int pb = 0; pb < p->nprobes; pb++)
-			{
-				t_probe *pr = &hops[t].probes[pb];
-				if (pr->sent && pr->got == 0)
-				{
-					double diff = (now.tv_sec - pr->send_time.tv_sec)
-						+ (now.tv_usec - pr->send_time.tv_usec) / 1000000.0;
-					if (diff >= PROBE_TIMEOUT)
-					{
-						pr->got = -1; // expired
-						active_queries--;
-					}
-				}
-			}
+			long remaining_ms;
+
+			remaining_ms = PROBE_TIMEOUT * 1000L - elapsed_ms;
+			left.tv_sec = remaining_ms / 1000L;
+			left.tv_usec = (remaining_ms % 1000L) * 1000L;
 		}
-        // 4. progressive probe by probe display for print_ttl
-		while (print_ttl <= p->max_hops)
+		FD_ZERO(&fds);
+		FD_SET(p->recv_sock, &fds);
+		ret = select(p->recv_sock + 1, &fds, NULL, NULL, &left);
+		if (ret < 0)
 		{
-			t_hop *h = &hops[print_ttl];
+			if (errno == EINTR)
+				continue;
+			return (-1);
+		}
+		if (ret == 0)
+			return (0);
+		if (FD_ISSET(p->recv_sock, &fds))
+		{
+			unsigned char	buf[512];
+			struct sockaddr_in	from;
+			socklen_t		flen;
+			ssize_t			n;
+			int				done;
+			int				matched;
 
-            int hop_ready = 1;
-            for (int pb = 0; pb < p->nprobes; pb++)
-            {
-                if (h->probes[pb].got == 0)
-                {
-                    hop_ready = 0;
-                    break;
-                }
-            }
-            if (!hop_ready)
-                break;
-
-			if (!header_printed)
-			{
-				printf("%2d ", print_ttl);
-				fflush(stdout);
-				header_printed = 1;
-				last.s_addr = 0;
-			}
-
-			while (printed_probes < p->nprobes)
-			{
-				t_probe *pr = &h->probes[printed_probes];
-				if (pr->got == 0)
-					break ; // wait for the respond or the next probe timeout
-				print_probe(&pr->reply, (pr->got == 1), &last);
-				fflush(stdout);
-				printed_probes++;
-			}
-
-			if (printed_probes == p->nprobes)
-			{
-				printf("\n");
-				fflush(stdout);
-				header_printed = 0;
-				printed_probes = 0;
-
-				if (target_reached && print_ttl >= target_reached)
-				{
-					print_ttl = p->max_hops + 1;
-					break ;
-				}
-				print_ttl++;
-			}
+			flen = sizeof(from);
+			n = recvfrom(p->recv_sock, buf, sizeof(buf), 0,
+				(struct sockaddr *)&from, &flen);
+			if (n <= 0)
+				continue;
+			done = 0;
+			if (p->mode == MODE_ICMP)
+				matched = match_icmp(p, buf, n, pr->seq, &done);
 			else
-				break ;
+				matched = match_udp(p, buf, n, pr->seq, &done);
+			if (!matched)
+				continue;
+			gettimeofday(&now, NULL);
+			pr->reply.from = from.sin_addr;
+			pr->reply.rtt = (now.tv_sec - pr->send_time.tv_sec) * 1000.0
+				+ (now.tv_usec - pr->send_time.tv_usec) / 1000.0;
+			pr->reply.done = done;
+			pr->got = 1;
+			return (1);
 		}
 	}
+}
 
-	close(p->send_sock);
+int	trace_loop(t_trace *p)
+{
+	int		ttl;
+	int		target_reached;
+	int		seq;
+
+	if (trace_setup(p) != 0)
+	{
+		perror("ft_traceroute: socket");
+		return (1);
+	}
+	ttl = p->first_ttl;
+	target_reached = 0;
+	seq = 0;
+	while (ttl <= p->max_hops && !target_reached)
+	{
+		t_hop	hop;
+		struct in_addr	last;
+		int		pb;
+
+		memset(&hop, 0, sizeof(hop));
+		hop.ttl = ttl;
+		last.s_addr = 0;
+		if (setsockopt(send_fd(p), IPPROTO_IP, IP_TTL, &ttl, sizeof(ttl)) < 0)
+		{
+			perror("setsockopt IP_TTL");
+			break;
+		}
+		printf("%2d ", ttl);
+		fflush(stdout);
+		pb = 0;
+		while (pb < p->nprobes)
+		{
+			t_probe	*pr;
+			int		wait_ret;
+
+			pr = &hop.probes[pb];
+			pr->seq = seq++;
+			pr->sent = 1;
+			gettimeofday(&pr->send_time, NULL);
+			if (send_probe(p, pr->seq) != 0)
+			{
+				pr->got = -1;
+				print_probe(&pr->reply, 0, &last);
+				pb++;
+				continue;
+			}
+			// Sequential mode: do not send the next probe until this one finishes.
+			wait_ret = wait_for_reply(p, pr);
+			if (wait_ret == 1)
+			{
+				print_probe(&pr->reply, 1, &last);
+				if (pr->reply.done)
+				{
+					target_reached = 1;
+					hop.done = 1;
+				}
+			}
+			else
+			{
+				pr->got = -1;
+				print_probe(&pr->reply, 0, &last);
+			}
+			fflush(stdout);
+			pb++;
+			if (target_reached)
+				break;
+		}
+		printf("\n");
+		fflush(stdout);
+		ttl++;
+	}
 	close(p->recv_sock);
+	close(p->send_sock);
 	return (0);
 }

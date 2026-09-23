@@ -38,8 +38,6 @@ static int	validate_opts(t_trace *p)
 		return (fprintf(stderr, "ft_traceroute: first ttl must be 1..max\n"), -1);
 	if (p->base_port < 1 || p->base_port > 65535)
 		return (fprintf(stderr, "ft_traceroute: port must be 1..65535\n"), -1);
-	if (p->nqueries == 0)
-		p->nqueries = 1;
 	return (0);
 }
 
@@ -56,12 +54,6 @@ static int	parse_args(t_trace *p, int argc, char **argv)
 			usage(0);
 		else if (!strcmp(argv[i], "-I"))
 			p->mode = MODE_ICMP;
-        else if (!strcmp(argv[i], "-N"))
-		{
-			if (i + 1 >= argc)
-				return (fprintf(stderr, "ft_traceroute: option '-N' needs a value\n"), -1);
-			p->nqueries = strtoul(argv[++i], NULL, 10);
-		}
 		else if ((tgt = opt_target(p, argv[i])) != NULL)
 		{
 			if (int_opt(argc, argv, &i, tgt) != 0)
@@ -107,7 +99,6 @@ int	main(int argc, char **argv)
 	p.nprobes = PROBES_PER_HOP;
 	p.first_ttl = 1;
 	p.base_port = BASE_PORT;
-    p.nqueries = MAX_SIMULTANEOUS;
 	if (parse_args(&p, argc, argv) != 0)
 		return (64);
 	if (resolve(&p) != 0)
