@@ -107,5 +107,8 @@ int	main(int argc, char **argv)
 		return (1);
 	}
 	p.id = getpid() & 0xffff;
+	printf("traceroute to %s (%s), %d hops max, %d byte packets\n",
+		p.host, p.ip_str, p.max_hops,
+		20 + 8 + PROBE_DATALEN);
 	return (trace_loop(&p));
 }

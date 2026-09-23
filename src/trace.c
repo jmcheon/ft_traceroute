@@ -335,8 +335,6 @@ int	trace_loop(t_trace *p)
 			}
 			fflush(stdout);
 			pb++;
-			if (target_reached)
-				break;
 		}
 		printf("\n");
 		fflush(stdout);
